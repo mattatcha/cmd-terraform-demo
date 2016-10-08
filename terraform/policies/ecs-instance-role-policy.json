@@ -11,7 +11,11 @@
         "ecs:RegisterContainerInstance",
         "ecs:StartTelemetrySession",
         "ecs:Submit*",
-        "ecs:StartTask"
+        "ecs:StartTask",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:GetAuthorizationToken"
       ],
       "Resource": "*"
     },

@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+
+
+# : "${AWS_ACCESS_KEY_ID:?}" "${AWS_SECRET_ACCESS_KEY:?}" "${CLUSTER:?}"
+: "${CLUSTER:?}"
+
+
+indent() {
+	while read line; do
+		# indent everything but a status-header
+		if [[ "$line" == ----* ]]; then
+			echo $'\e[1G'$line
+		else
+			echo $'\e[1G      ' "$line"
+		fi
+	done
+}
+
+status-header() {
+	echo "----->" $@ "..."
+}
+
+repository-uri() {
+    local app="$1"
+    aws ecr describe-repositories --repository-name "$app" 2>/dev/null \
+        | jq -r '.repositories[0].repositoryUri' \
+    || aws ecr create-repository --repository-name "$app" \
+        | jq -r '.repository.repositoryUri'
+}
+
+update-service() {
+    local cluster="$1" app="$2" count="$3" lb="$4" role="$5" args
+    args="--cluster "$cluster" --service "$app-service" --task-definition "$app-task" --desired-count "$count""
+
+    aws ecs create-service $args --role="$role" --load-balancers "$lb" 2>/dev/null \
+		| jq -r '.service.serviceArn' \
+    || aws ecs update-service $args \
+		| jq -r '.service.serviceArn'
+}
+
+transform-compose() {
+    local image="$1"
+	# using # instead of / since an image is a url
+    sed "s#build: .*#image: $image#g" docker-compose.yml \
+        | container-transform -v | jq -jc .
+}
+
+get-loadbalancers() {
+	jq --arg target_group "$2" -jc '[.containerDefinitions[] | select(.dockerLabels."cluster.alb")
+		| {
+			containerName: .name,
+			containerPort: .dockerLabels."cluster.alb" | tonumber,
+			targetGroupArn: $target_group
+		}]'
+}
+
+main() {
+	set -eo pipefail; [[ "$TRACE" ]] && set -x
+    local app="$1" tag="$2" count="$3"
+    : "${app:?}" "${tag:?}" "${count:=1}"
+
+
+    status-header "Building Image"
+    docker build -t "$app" .
+
+    status-header "Fetching Repository URL"
+    local repo="$(repository-uri $app):$tag"
+    docker tag "$app" "$repo"
+
+    status-header "Logging into ECR"
+    eval "$(aws ecr get-login)"
+
+    status-header "Pushing Image"
+    docker push "$repo"
+
+    status-header "Update Task Definition"
+    local taskdef="$(transform-compose $repo)"
+    printf "Revision: %s\n" \
+        "$(aws ecs register-task-definition --family "$app-task" --cli-input-json "$taskdef" | jq .taskDefinition.revision)"
+
+
+	status-header "Extracting Balancer Config"
+	local loadBalancers="$(echo "$taskdef" | get-loadbalancers "$ALB_NAME" "$TARGET_GROUP")"
+	echo "Load Balancers: $loadBalancers"
+
+    status-header "Update Service"
+	local svc desired
+	desired="$(echo "$taskdef" | jq 'first(.containerDefinitions[] | .dockerLabels."cluster.count") | tonumber')"
+    svc="$(update-service "$CLUSTER" "$app" "$desired" "$loadBalancers" "$SERVICE_ROLE")"
+	echo "Service ARN: $svc"
+
+    status-header "Waiting for Service"
+    aws ecs wait services-stable --cluster "$CLUSTER" --services "$svc"
+}
+
+main "$@" | indent

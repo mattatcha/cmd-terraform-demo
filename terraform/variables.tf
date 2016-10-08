@@ -6,6 +6,10 @@ variable "prefix" {
   default = "demo"
 }
 
+variable "count" {
+  default = 2
+}
+
 variable "instance_type" {
   default = "t2.micro"
 }

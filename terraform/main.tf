@@ -63,7 +63,7 @@ resource "aws_security_group" "default" {
 }
 
 resource "aws_instance" "node" {
-  count                = 2
+  count                = "${var.count}"
   ami                  = "${data.aws_ami.coreos.id}"
   instance_type        = "${var.instance_type}"
   key_name             = "${var.key_name}"
@@ -84,6 +84,25 @@ resource "aws_alb" "main" {
   name            = "${var.prefix}-alb"
   subnets         = ["${aws_subnet.main.*.id}"]
   security_groups = ["${aws_security_group.default.id}"]
+}
+
+resource "aws_alb_target_group" "80" {
+  name                 = "${var.prefix}-tg-80"
+  port                 = 80
+  protocol             = "HTTP"
+  vpc_id               = "${aws_vpc.main.id}"
+  deregistration_delay = 5
+}
+
+resource "aws_alb_listener" "front_end" {
+  load_balancer_arn = "${aws_alb.main.arn}"
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    target_group_arn = "${aws_alb_target_group.80.arn}"
+    type             = "forward"
+  }
 }
 
 data "aws_ami" "coreos" {

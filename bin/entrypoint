@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+
+tf() {
+    terraform remote config \
+          -backend=s3 \
+          -backend-config="bucket=$TF_STATE_bucket" \
+          -backend-config="key=$TF_STATE_key" > /dev/null
+
+    terraform $@
+}
+
+cluster-init() {
+    tf apply /var/terraform
+}
+
+cluster-output() {
+    tf output "$1"
+}
+cluster-destroy() {
+    tf destroy -var "instance_count=$count" /var/terraform
+}
+
+cluster-git-receive() {
+    local repo="$1"
+    if [[ "$repo" != /* ]]; then
+      repo="/$repo"
+    fi
+    export REPO="$repo"
+    git init --quiet --bare "$repo"
+
+    ln -s "$0" "$repo/hooks/pre-receive"
+    git-shell -c "git-receive-pack '$repo'"
+}
+
+delete-remote-prefix() {
+  # this removes "remote: " that git prefixes hook output with client side
+  sed -u "s/^/"$'\e[1G'"/"
+}
+
+
+cluster-pre-receive() {
+    # reads git push header data into variables
+    read old new ref
+    # use archive to tarpipe pushed branch files to a working directory
+    git archive "$new" | (cd /tmp && tar -xpf -)
+
+    # go to that directory
+    cd /tmp
+
+    CLUSTER="$(cluster-output cluster_name)" \
+    ALB_NAME="$(cluster-output alb_name)" \
+    TARGET_GROUP="$(cluster-output target_group)" \
+    SERVICE_ROLE="$(cluster-output service_role)" \
+        /usr/local/bin/deploy "$(basename "$REPO")" "latest"
+}
+
+cluster-help() {
+    cat <<EOF
+Available Commands:
+    init
+    destroy
+    help
+EOF
+}
+
+main() {
+    set -eo pipefail; [[ "$TRACE" ]] && set -x
+    declare script="$0" cmd="$1"
+    [[ "$script" == "hooks/pre-receive" ]] && cmd="pre-receive"
+    case "$cmd" in
+        init)                            shift; cluster-init "$@";;
+        destroy)                         shift; cluster-destroy "$@";;
+        git-receive|git-receive-pack)    shift; cluster-git-receive "$@";;
+        pre-receive)                     cluster-pre-receive | delete-remote-prefix;;
+        *)                               cluster-help;;
+    esac
+}
+
+main "$@"
