@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
-
-
-# : "${AWS_ACCESS_KEY_ID:?}" "${AWS_SECRET_ACCESS_KEY:?}" "${CLUSTER:?}"
 : "${CLUSTER:?}"
-
 
 indent() {
 	while read line; do
@@ -17,7 +13,7 @@ indent() {
 }
 
 status-header() {
-	echo "----->" $@ "..."
+	echo "----->" "$@" "..."
 }
 
 repository-uri() {
@@ -30,8 +26,9 @@ repository-uri() {
 
 update-service() {
     local cluster="$1" app="$2" count="$3" lb="$4" role="$5" args
-    args="--cluster "$cluster" --service "$app-service" --task-definition "$app-task" --desired-count "$count""
+    args="--cluster $cluster --service "$app-service" --task-definition "$app-task" --desired-count $count"
 
+	# ignore output of ecs create-service
     aws ecs create-service $args --role="$role" --load-balancers "$lb" 2>/dev/null \
 		| jq -r '.service.serviceArn' \
     || aws ecs update-service $args \
@@ -45,8 +42,20 @@ transform-compose() {
         | container-transform -v | jq -jc .
 }
 
+tf-apply() {
+	local app="$1"
+	: "${app:?}"
+
+	/usr/local/bin/entrypoint tf-app "$app" apply /var/terraform/app > /dev/null
+}
+
 get-loadbalancers() {
-	jq --arg target_group "$2" -jc '[.containerDefinitions[] | select(.dockerLabels."cluster.alb")
+	local app="$1"
+	: "${app:?}"
+
+	local tg
+	tg="$(/usr/local/bin/entrypoint tf-app "$app" output target_group)"
+	jq --arg target_group "$tg" -jc '[.containerDefinitions[] | select(.dockerLabels."cluster.alb")
 		| {
 			containerName: .name,
 			containerPort: .dockerLabels."cluster.alb" | tonumber,
@@ -59,12 +68,12 @@ main() {
     local app="$1" tag="$2" count="$3"
     : "${app:?}" "${tag:?}" "${count:=1}"
 
-
     status-header "Building Image"
     docker build -t "$app" .
 
     status-header "Fetching Repository URL"
-    local repo="$(repository-uri $app):$tag"
+    local repo
+	repo="$(repository-uri $app):$tag"
     docker tag "$app" "$repo"
 
     status-header "Logging into ECR"
@@ -74,23 +83,30 @@ main() {
     docker push "$repo"
 
     status-header "Update Task Definition"
-    local taskdef="$(transform-compose $repo)"
+    local taskdef
+	taskdef="$(transform-compose $repo)"
     printf "Revision: %s\n" \
         "$(aws ecs register-task-definition --family "$app-task" --cli-input-json "$taskdef" | jq .taskDefinition.revision)"
 
+	status-header "Updating loadBalancers"
+	tf-apply "$app"
 
 	status-header "Extracting Balancer Config"
-	local loadBalancers="$(echo "$taskdef" | get-loadbalancers "$ALB_NAME" "$TARGET_GROUP")"
-	echo "Load Balancers: $loadBalancers"
+	local loadBalancers
+	loadBalancers="$(echo "$taskdef" | get-loadbalancers "$app")"
 
     status-header "Update Service"
 	local svc desired
-	desired="$(echo "$taskdef" | jq 'first(.containerDefinitions[] | .dockerLabels."cluster.count") | tonumber')"
+	desired="$(echo "$taskdef" | jq 'first(.containerDefinitions[] | .dockerLabels."cluster.count") // 1 | tonumber')"
     svc="$(update-service "$CLUSTER" "$app" "$desired" "$loadBalancers" "$SERVICE_ROLE")"
-	echo "Service ARN: $svc"
 
     status-header "Waiting for Service"
     aws ecs wait services-stable --cluster "$CLUSTER" --services "$svc"
+
+	status-header "Done"
+	printf "Hostname: %s\n" \
+		tg="$(/usr/local/bin/entrypoint tf-app "$app" output alb_hostname)"
+
 }
 
 main "$@" | indent
