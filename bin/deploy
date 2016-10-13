@@ -33,7 +33,7 @@ repository-uri() {
 
 update-service() {
     local cluster="$1" app="$2" count="$3" lb="$4" role="$5" args
-    args="--cluster $cluster --service "$app-service" --task-definition "$app-task" --desired-count $count"
+    args="--cluster $cluster --service $app --task-definition $app --desired-count $count"
 
 	# ignore output of ecs create-service
     aws ecs create-service $args --role="$role" --load-balancers "$lb" 2>/dev/null \
@@ -104,11 +104,10 @@ service-wait() {
 		last="$(echo "$events" | jq --argjson last "$last" 'sort_by(.createdAt) | .[-1].createdAt // $last')"
 		echo "$events" | jq -r '.[].message'
 
-		echo "$output" | jq -e '.services[].deployments |
-									[
-										length == 1,
-										(.[] | select(.status == "PRIMARY") | .desiredCount == .runningCount)
-									] | all' > /dev/null && break
+		echo "$output" | jq -e '.services[] | [
+												(.deployments | length == 1),
+                                                (.desiredCount == .runningCount)
+                                        	] | all' > /dev/null && break
 	done
 }
 
@@ -118,7 +117,7 @@ main() {
 
     declare cluster="$1" app="$2" tag="$3"
     : "${cluster:?}" "${app:?}" "${tag:?}"
-
+	
     status-header "Building Image"
     docker build -t "$app" .
 
@@ -137,7 +136,7 @@ main() {
     local taskdef
 	taskdef="$(compose-to-task $repo)"
     info "Revision" "$(aws ecs register-task-definition \
-						--family "$app-task" --cli-input-json "$taskdef" \
+						--family "$app" --cli-input-json "$taskdef" \
 						| jq .taskDefinition.revision)"
 
 	status-header "Updating loadBalancers"
@@ -147,7 +146,7 @@ main() {
 	local loadBalancers
 	loadBalancers="$(echo "$taskdef" | get-loadbalancers "$app")"
 
-    status-header "Updateing Service"
+    status-header "Updating Service"
 	local svc desired_count
 	desired_count="$(echo "$taskdef" | jq 'first(.containerDefinitions[] | .dockerLabels."cluster.count") // 1 | tonumber')"
     svc="$(update-service "$cluster" "$app" "$desired_count" "$loadBalancers" "$SERVICE_ROLE")"
