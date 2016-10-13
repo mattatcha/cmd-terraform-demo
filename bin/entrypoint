@@ -27,10 +27,6 @@ cluster-init() {
     tf apply /var/terraform
 }
 
-cluster-output() {
-    tf output "$1"
-}
-
 cluster-destroy() {
     tf destroy /var/terraform
 }
@@ -54,7 +50,7 @@ delete-remote-prefix() {
 
 cluster-pre-receive() {
     # reads git push header data into variables
-    read old new ref
+    read _ new _
     # use archive to tarpipe pushed branch files to a working directory
     git archive "$new" | (cd /tmp && tar -xpf -)
 
@@ -62,15 +58,14 @@ cluster-pre-receive() {
     local app="$(basename "$REPO")"
     : "${app:?}"
 
-    cd /tmp # TODO: refactor the following
+    cd /tmp # TODO(mattaitchison): refactor the following
     export TF_VAR_cluster TF_VAR_subnets TF_VAR_vpc
-    TF_VAR_cluster="$(cluster-output cluster_name)"
+    TF_VAR_cluster="$(tf output cluster_name)"
     TF_VAR_subnets="$(tf output -json subnets | jq -c .value)"
-    TF_VAR_vpc="$(cluster-output vpc_id)"
+    TF_VAR_vpc="$(tf output vpc_id)"
 
-    CLUSTER="$TF_VAR_cluster" \
-    SERVICE_ROLE="$(cluster-output service_role)" \
-        /usr/local/bin/deploy "$(basename "$REPO")" "latest"
+    SERVICE_ROLE="$(tf output service_role)" \
+        /usr/local/bin/deploy "$TF_VAR_cluster" "$(basename "$REPO")" "latest"
 }
 
 cluster-help() {
@@ -97,4 +92,4 @@ main() {
     esac
 }
 
-main "$@"
+[[ "$0" == "$BASH_SOURCE" ]] && main "$@"
