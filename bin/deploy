@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 
+info-header() {
+	echo "=====>" "$@"
+}
 
-# : "${AWS_ACCESS_KEY_ID:?}" "${AWS_SECRET_ACCESS_KEY:?}" "${CLUSTER:?}"
-: "${CLUSTER:?}"
-
+info() {
+	printf "       %-16s: %s\n" "$1" "$2"
+}
 
 indent() {
 	while read line; do
@@ -17,7 +20,7 @@ indent() {
 }
 
 status-header() {
-	echo "----->" $@ "..."
+	echo "----->" "$@" "..."
 }
 
 repository-uri() {
@@ -30,23 +33,36 @@ repository-uri() {
 
 update-service() {
     local cluster="$1" app="$2" count="$3" lb="$4" role="$5" args
-    args="--cluster "$cluster" --service "$app-service" --task-definition "$app-task" --desired-count "$count""
+    args="--cluster $cluster --service $app --task-definition $app --desired-count $count"
 
+	# ignore output of ecs create-service
     aws ecs create-service $args --role="$role" --load-balancers "$lb" 2>/dev/null \
 		| jq -r '.service.serviceArn' \
     || aws ecs update-service $args \
 		| jq -r '.service.serviceArn'
 }
 
-transform-compose() {
+compose-to-task() {
+	declare desc="generate an ecs task definition from a docker-compose.yml file"
     local image="$1"
 	# using # instead of / since an image is a url
     sed "s#build: .*#image: $image#g" docker-compose.yml \
         | container-transform -v | jq -jc .
 }
 
+tf-apply() {
+	local app="$1"
+	: "${app:?}"
+
+	tf-app "$app" apply > /dev/null
+}
+
 get-loadbalancers() {
-	jq --arg target_group "$2" -jc '[.containerDefinitions[] | select(.dockerLabels."cluster.alb")
+	local app="$1" tg
+	: "${app:?}"
+
+	tg="$(tf-app "$app" output target_group)"
+	jq --arg target_group "$tg" -jc '[.containerDefinitions[] | select(.dockerLabels."cluster.alb")
 		| {
 			containerName: .name,
 			containerPort: .dockerLabels."cluster.alb" | tonumber,
@@ -54,17 +70,63 @@ get-loadbalancers() {
 		}]'
 }
 
-main() {
-	set -eo pipefail; [[ "$TRACE" ]] && set -x
-    local app="$1" tag="$2" count="$3"
-    : "${app:?}" "${tag:?}" "${count:=1}"
+alb-wait() {
+	local name="$1"
+	: "${name:?}"
 
+	for _ in $(seq 1 60); do
+		sleep 5 \
+			&& aws elbv2 describe-load-balancers --name "$name" \
+				| jq -e '.LoadBalancers[].State.Code == "active"' > /dev/null \
+			&& break
+	done
+}
+
+current-deployment() {
+	local cluster="$1" name="$2"
+	: "${cluster:?}" "${name:?}"
+
+	aws ecs describe-services --services "$name" --cluster "$cluster" \
+		| jq '.services[].deployments[] | select(.status == "PRIMARY")'
+}
+
+service-wait() {
+	local cluster="$1" name="$2"
+	: "${cluster:?}" "${name:?}"
+
+	local last
+	last="$(current-deployment "$cluster" "$name" | jq -r '.updatedAt')"
+	for _ in $(seq 1 60); do
+		sleep 3
+		local output events
+		output="$(aws ecs describe-services --services "$name" --cluster "$cluster")"
+		events="$(echo "$output" | jq --argjson last "$last" '.services[] | [(.events[] | select(.createdAt > $last))]')"
+		last="$(echo "$events" | jq --argjson last "$last" 'sort_by(.createdAt) | .[-1].createdAt // $last')"
+		echo "$events" | jq -r '.[].message'
+
+		echo "$output" | jq -e '.services[] | [
+												(.deployments | length == 1),
+                                                (.desiredCount == .runningCount)
+                                        	] | all' > /dev/null && break
+	done
+}
+
+main() {
+	source "$(dirname $BASH_SOURCE)/entrypoint"
+	set -eo pipefail; [[ "$TRACE" ]] && set -x
+
+    declare cluster="$1" app="$2" tag="$3"
+    : "${cluster:?}" "${app:?}" "${tag:?}"
+
+	status-header "Creating load balancer"
+	tf-apply "$app"
 
     status-header "Building Image"
     docker build -t "$app" .
 
     status-header "Fetching Repository URL"
-    local repo="$(repository-uri $app):$tag"
+    local repo
+	repo="$(repository-uri $app):$tag"
     docker tag "$app" "$repo"
 
     status-header "Logging into ECR"
@@ -74,23 +136,30 @@ main() {
     docker push "$repo"
 
     status-header "Update Task Definition"
-    local taskdef="$(transform-compose $repo)"
-    printf "Revision: %s\n" \
-        "$(aws ecs register-task-definition --family "$app-task" --cli-input-json "$taskdef" | jq .taskDefinition.revision)"
-
+    local taskdef
+	taskdef="$(compose-to-task $repo)"
+    info "Revision" "$(aws ecs register-task-definition \
+						--family "$app" --cli-input-json "$taskdef" \
+						| jq .taskDefinition.revision)"
 
 	status-header "Extracting Balancer Config"
-	local loadBalancers="$(echo "$taskdef" | get-loadbalancers "$ALB_NAME" "$TARGET_GROUP")"
-	echo "Load Balancers: $loadBalancers"
+	local loadBalancers
+	loadBalancers="$(echo "$taskdef" | get-loadbalancers "$app")"
 
-    status-header "Update Service"
-	local svc desired
-	desired="$(echo "$taskdef" | jq 'first(.containerDefinitions[] | .dockerLabels."cluster.count") | tonumber')"
-    svc="$(update-service "$CLUSTER" "$app" "$desired" "$loadBalancers" "$SERVICE_ROLE")"
-	echo "Service ARN: $svc"
+    status-header "Updating Service"
+	local svc desired_count
+	desired_count="$(echo "$taskdef" | jq 'first(.containerDefinitions[] | .dockerLabels."cluster.count") // 1 | tonumber')"
+    svc="$(update-service "$cluster" "$app" "$desired_count" "$loadBalancers" "$SERVICE_ROLE")"
 
     status-header "Waiting for Service"
-    aws ecs wait services-stable --cluster "$CLUSTER" --services "$svc"
+	service-wait "$cluster" "$svc"
+
+	status-header "Waiting for load balancer"
+	alb-wait "$(tf-app "$app" output alb_name)"
+
+	info-header "App deployed"
+	info "Hostname" "$(tf-app "$app" output alb_hostname)"
+
 }
 
 main "$@" | indent

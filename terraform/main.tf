@@ -5,7 +5,7 @@ provider "aws" {
 data "aws_availability_zones" "available" {}
 
 resource "aws_ecs_cluster" "main" {
-  name = "${var.prefix}-cluster"
+  name = "${var.name}"
 }
 
 resource "aws_vpc" "main" {
@@ -13,7 +13,7 @@ resource "aws_vpc" "main" {
   enable_dns_hostnames = true
 
   tags {
-    Name = "${var.prefix}.vpc"
+    Name = "${var.name}.vpc"
   }
 }
 
@@ -25,7 +25,7 @@ resource "aws_subnet" "main" {
   map_public_ip_on_launch = true
 
   tags {
-    Name = "${var.prefix}.sub.${count.index}"
+    Name = "${var.name}.sub.${count.index}"
   }
 }
 
@@ -33,7 +33,7 @@ resource "aws_internet_gateway" "gw" {
   vpc_id = "${aws_vpc.main.id}"
 
   tags {
-    Name = "${var.prefix}.ig"
+    Name = "${var.name}.ig"
   }
 }
 
@@ -44,7 +44,7 @@ resource "aws_route" "internet_access" {
 }
 
 resource "aws_security_group" "default" {
-  name   = "${var.prefix}.sg.default"
+  name   = "${var.name}.sg.default"
   vpc_id = "${aws_vpc.main.id}"
 
   ingress {
@@ -76,32 +76,7 @@ resource "aws_instance" "node" {
   ]
 
   tags {
-    Name = "${var.prefix}.node.${count.index}"
-  }
-}
-
-resource "aws_alb" "main" {
-  name            = "${var.prefix}-alb"
-  subnets         = ["${aws_subnet.main.*.id}"]
-  security_groups = ["${aws_security_group.default.id}"]
-}
-
-resource "aws_alb_target_group" "80" {
-  name                 = "${var.prefix}-tg-80"
-  port                 = 80
-  protocol             = "HTTP"
-  vpc_id               = "${aws_vpc.main.id}"
-  deregistration_delay = 5
-}
-
-resource "aws_alb_listener" "front_end" {
-  load_balancer_arn = "${aws_alb.main.arn}"
-  port              = 80
-  protocol          = "HTTP"
-
-  default_action {
-    target_group_arn = "${aws_alb_target_group.80.arn}"
-    type             = "forward"
+    Name = "${var.name}.node.${count.index}"
   }
 }
 
@@ -139,5 +114,5 @@ data "template_file" "cloud_config" {
 }
 
 resource "aws_cloudwatch_log_group" "ecs" {
-  name = "${var.prefix}.cluster/agent"
+  name = "${var.name}.cluster/agent"
 }

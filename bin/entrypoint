@@ -1,23 +1,34 @@
 #!/usr/bin/env bash
-
+: "${TF_STATE_bucket:?}" "${TF_STATE_key:?}"
 tf() {
+    (cd /var/terraform
     terraform remote config \
           -backend=s3 \
           -backend-config="bucket=$TF_STATE_bucket" \
-          -backend-config="key=$TF_STATE_key" > /dev/null
+          -backend-config="key=$TF_STATE_key.tfstate" > /dev/null
 
-    terraform $@
+    terraform "$@")
+}
+
+tf-app() {
+    local app="$1"
+    : "${app:?}"; shift
+
+    (cd /var/terraform/app
+    terraform remote config \
+          -backend=s3 \
+          -backend-config="bucket=$TF_STATE_bucket" \
+          -backend-config="key=$TF_STATE_key-$app.tfstate" > /dev/null
+    TF_VAR_app="$app" \
+        terraform "$@")
 }
 
 cluster-init() {
     tf apply /var/terraform
 }
 
-cluster-output() {
-    tf output "$1"
-}
 cluster-destroy() {
-    tf destroy -var "instance_count=$count" /var/terraform
+    tf destroy /var/terraform
 }
 
 cluster-git-receive() {
@@ -37,21 +48,24 @@ delete-remote-prefix() {
   sed -u "s/^/"$'\e[1G'"/"
 }
 
-
 cluster-pre-receive() {
     # reads git push header data into variables
-    read old new ref
+    read _ new _
     # use archive to tarpipe pushed branch files to a working directory
     git archive "$new" | (cd /tmp && tar -xpf -)
 
     # go to that directory
-    cd /tmp
+    local app="$(basename "$REPO")"
+    : "${app:?}"
 
-    CLUSTER="$(cluster-output cluster_name)" \
-    ALB_NAME="$(cluster-output alb_name)" \
-    TARGET_GROUP="$(cluster-output target_group)" \
-    SERVICE_ROLE="$(cluster-output service_role)" \
-        /usr/local/bin/deploy "$(basename "$REPO")" "latest"
+    cd /tmp # TODO(mattaitchison): refactor the following
+    export TF_VAR_cluster TF_VAR_subnets TF_VAR_vpc
+    TF_VAR_cluster="$(tf output cluster_name)"
+    TF_VAR_subnets="$(tf output -json subnets | jq -c .value)"
+    TF_VAR_vpc="$(tf output vpc_id)"
+
+    SERVICE_ROLE="$(tf output service_role)" \
+        /usr/local/bin/deploy "$TF_VAR_cluster" "$(basename "$REPO")" "latest"
 }
 
 cluster-help() {
@@ -69,6 +83,8 @@ main() {
     [[ "$script" == "hooks/pre-receive" ]] && cmd="pre-receive"
     case "$cmd" in
         init)                            shift; cluster-init "$@";;
+        tf)                              shift; tf "$@";;
+        tf-app)                          shift; tf-app "$@";;
         destroy)                         shift; cluster-destroy "$@";;
         git-receive|git-receive-pack)    shift; cluster-git-receive "$@";;
         pre-receive)                     cluster-pre-receive | delete-remote-prefix;;
@@ -76,4 +92,4 @@ main() {
     esac
 }
 
-main "$@"
+[[ "$0" == "$BASH_SOURCE" ]] && main "$@"
