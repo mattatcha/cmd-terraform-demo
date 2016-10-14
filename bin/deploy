@@ -54,7 +54,7 @@ tf-apply() {
 	local app="$1"
 	: "${app:?}"
 
-	tf-app "$app" apply /var/terraform/app > /dev/null
+	tf-app "$app" apply > /dev/null
 }
 
 get-loadbalancers() {
@@ -117,7 +117,10 @@ main() {
 
     declare cluster="$1" app="$2" tag="$3"
     : "${cluster:?}" "${app:?}" "${tag:?}"
-	
+
+	status-header "Creating load balancer"
+	tf-apply "$app"
+
     status-header "Building Image"
     docker build -t "$app" .
 
@@ -139,9 +142,6 @@ main() {
 						--family "$app" --cli-input-json "$taskdef" \
 						| jq .taskDefinition.revision)"
 
-	status-header "Updating loadBalancers"
-	tf-apply "$app"
-
 	status-header "Extracting Balancer Config"
 	local loadBalancers
 	loadBalancers="$(echo "$taskdef" | get-loadbalancers "$app")"
@@ -154,7 +154,7 @@ main() {
     status-header "Waiting for Service"
 	service-wait "$cluster" "$svc"
 
-	status-header "Waiting for loadBalancer"
+	status-header "Waiting for load balancer"
 	alb-wait "$(tf-app "$app" output alb_name)"
 
 	info-header "App deployed"
