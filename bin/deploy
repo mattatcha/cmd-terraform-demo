@@ -24,30 +24,30 @@ status-header() {
 }
 
 repository-uri() {
-    local app="$1"
-    aws ecr describe-repositories --repository-name "$app" 2>/dev/null \
-        | jq -r '.repositories[0].repositoryUri' \
-    || aws ecr create-repository --repository-name "$app" \
-        | jq -r '.repository.repositoryUri'
+	local app="$1"
+	aws ecr describe-repositories --repository-name "$app" 2>/dev/null \
+		| jq -r '.repositories[0].repositoryUri' \
+	|| aws ecr create-repository --repository-name "$app" \
+		| jq -r '.repository.repositoryUri'
 }
 
 update-service() {
-    local cluster="$1" app="$2" count="$3" lb="$4" role="$5" args
-    args="--cluster $cluster --service $app --task-definition $app --desired-count $count"
+	local cluster="$1" app="$2" count="$3" lb="$4" role="$5" args
+	args="--cluster $cluster --service $app --task-definition $app --desired-count $count"
 
 	# ignore output of ecs create-service
-    aws ecs create-service $args --role="$role" --load-balancers "$lb" 2>/dev/null \
+	aws ecs create-service $args --role="$role" --load-balancers "$lb" 2>/dev/null \
 		| jq -r '.service.serviceArn' \
-    || aws ecs update-service $args \
+	|| aws ecs update-service $args \
 		| jq -r '.service.serviceArn'
 }
 
 compose-to-task() {
 	declare desc="generate an ecs task definition from a docker-compose.yml file"
-    local image="$1"
+	local image="$1"
 	# using # instead of / since an image is a url
-    sed "s#build: .*#image: $image#g" docker-compose.yml \
-        | container-transform -v | jq -jc .
+	sed "s#build: .*#image: $image#g" docker-compose.yml \
+		| container-transform -v | jq -jc .
 }
 
 tf-apply() {
@@ -106,8 +106,8 @@ service-wait() {
 
 		echo "$output" | jq -e '.services[] | [
 												(.deployments | length == 1),
-                                                (.desiredCount == .runningCount)
-                                        	] | all' > /dev/null && break
+												(.desiredCount == .runningCount)
+											] | all' > /dev/null && break
 	done
 }
 
@@ -115,30 +115,30 @@ main() {
 	source "$(dirname $BASH_SOURCE)/entrypoint"
 	set -eo pipefail; [[ "$TRACE" ]] && set -x
 
-    declare cluster="$1" app="$2" tag="$3"
-    : "${cluster:?}" "${app:?}" "${tag:?}"
+	declare cluster="$1" app="$2" tag="$3"
+	: "${cluster:?}" "${app:?}" "${tag:?}"
 
 	status-header "Creating load balancer"
 	tf-apply "$app"
 
-    status-header "Building Image"
-    docker build -t "$app" .
+	status-header "Building Image"
+	docker build -t "$app" .
 
-    status-header "Fetching Repository URL"
-    local repo
+	status-header "Fetching Repository URL"
+	local repo
 	repo="$(repository-uri $app):$tag"
-    docker tag "$app" "$repo"
+	docker tag "$app" "$repo"
 
-    status-header "Logging into ECR"
-    eval "$(aws ecr get-login)"
+	status-header "Logging into ECR"
+	eval "$(aws ecr get-login)"
 
-    status-header "Pushing Image"
-    docker push "$repo"
+	status-header "Pushing Image"
+	docker push "$repo"
 
-    status-header "Update Task Definition"
-    local taskdef
+	status-header "Update Task Definition"
+	local taskdef
 	taskdef="$(compose-to-task $repo)"
-    info "Revision" "$(aws ecs register-task-definition \
+	info "Revision" "$(aws ecs register-task-definition \
 						--family "$app" --cli-input-json "$taskdef" \
 						| jq .taskDefinition.revision)"
 
@@ -146,12 +146,12 @@ main() {
 	local loadBalancers
 	loadBalancers="$(echo "$taskdef" | get-loadbalancers "$app")"
 
-    status-header "Updating Service"
+	status-header "Updating Service"
 	local svc desired_count
 	desired_count="$(echo "$taskdef" | jq 'first(.containerDefinitions[] | .dockerLabels."cluster.count") // 1 | tonumber')"
-    svc="$(update-service "$cluster" "$app" "$desired_count" "$loadBalancers" "$SERVICE_ROLE")"
+	svc="$(update-service "$cluster" "$app" "$desired_count" "$loadBalancers" "$SERVICE_ROLE")"
 
-    status-header "Waiting for Service"
+	status-header "Waiting for Service"
 	service-wait "$cluster" "$svc"
 
 	status-header "Waiting for load balancer"
